@@ -1,0 +1,1 @@
+ALTER TABLE books ADD COLUMN currency varchar(255) NOT NULL;

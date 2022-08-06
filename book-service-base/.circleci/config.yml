@@ -1,0 +1,87 @@
+version: 2.1
+
+workflows:
+  version: 2
+  build_and_test:
+    jobs:
+      - build
+      - test
+      - package:
+          requires:
+            - build
+            - test
+      - deploy:
+          requires:
+            - package
+
+jobs:
+  build:
+    docker:
+      - image: openjdk:8-jdk-alpine
+    steps:
+      - checkout
+      - run: ./gradlew bootJar
+      - persist_to_workspace:
+          root: ./
+          paths:
+            - build/
+            - .gradle/
+  test:
+    docker:
+      - image: openjdk:8-jdk-alpine
+    steps:
+      - checkout
+      - run: ./gradlew test
+      - store_test_results:
+          path: build/test-results
+      - store_artifacts:
+          path: build/test-results
+      - run: apk add --no-cache curl
+#      The following is a hook to notify a channel when the build has passed or failed.
+#      To make it work you need to set the CHAT_WEBHOOK_URL environement variable in CIRCLE CI.
+#      The value of this variable is the webhook URL of your team's google space. (https://developers.google.com/chat/how-tos/webhooks)
+      - run:
+          when: on_success
+          command: |
+            curl --header "Content-Type: application/json" \
+            --request POST \
+            --data "{\"cards\":[{\"header\":{\"title\":\"${CIRCLE_JOB} successful.\",\"subtitle\":\"${CIRCLE_PROJECT_REPONAME}-${CIRCLE_BRANCH}\",\"imageUrl\":\"https://png.pngtree.com/svg/20170510/success_404253.png\",\"imageStyle\":\"IMAGE\"},\"sections\":[{\"widgets\":[{\"keyValue\":{\"topLabel\":\"${CIRCLE_TAG}\",\"content\":\"Credits - ${CIRCLE_USERNAME}\"}}]},{\"widgets\":[{\"buttons\":[{\"textButton\":{\"text\":\"DETAILS\",\"onClick\":{\"openLink\":{\"url\":\"${CIRCLE_BUILD_URL}\"}}}}]}]}]}]}" \
+            "$CHAT_WEBHOOK_URL"
+      - run:
+          when: on_fail
+          command: |
+            curl --header "Content-Type: application/json" \
+            --request POST \
+            --data "{\"cards\":[{\"header\":{\"title\":\"Oops. ${CIRCLE_JOB} failed.\",\"subtitle\":\"${CIRCLE_PROJECT_REPONAME}-${CIRCLE_BRANCH}\",\"imageUrl\":\"https://png.pngtree.com/svg/20170406/icon_failed__1325447.png\",\"imageStyle\":\"IMAGE\"},\"sections\":[{\"widgets\":[{\"keyValue\":{\"topLabel\":\"${CIRCLE_TAG}\",\"content\":\"Credits - ${CIRCLE_USERNAME}\"}}]},{\"widgets\":[{\"buttons\":[{\"textButton\":{\"text\":\"DETAILS\",\"onClick\":{\"openLink\":{\"url\":\"${CIRCLE_BUILD_URL}\"}}}}]}]}]}]}" \
+            "$CHAT_WEBHOOK_URL"
+
+  package:
+    docker:
+      - image: docker:dind
+    steps:
+      - setup_remote_docker:
+          version: 19.03.13
+      - checkout
+      - attach_workspace:
+          at: ./
+      - run: docker build --iidfile image.txt -t registry.heroku.com/$HEROKU_APP_NAME/web:${CIRCLE_SHA1} .
+      - run: docker login --username=_ --password=$HEROKU_TOKEN registry.heroku.com
+      - run: docker push registry.heroku.com/$HEROKU_APP_NAME/web:${CIRCLE_SHA1}
+      - persist_to_workspace:
+          root: ./
+          paths:
+            - image.txt
+
+  deploy:
+    docker:
+      - image: docker:dind
+    steps:
+      - setup_remote_docker:
+          version: 19.03.13
+      - attach_workspace:
+          at: ./
+      - run: apk add --no-cache curl
+      - run:
+          name: "Patch the container hosted in heroku"
+          command: |
+            curl -X PATCH https://api.heroku.com/apps/$HEROKU_APP_NAME/formation --header "Content-Type: application/json" --header "Accept: application/vnd.heroku+json; version=3.docker-releases" --header "Authorization: Bearer ${HEROKU_TOKEN}" --data '{ "updates": [ { "type": "web", "docker_image": "'$(cat image.txt)'" } ] }'
